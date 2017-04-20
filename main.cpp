@@ -4,6 +4,8 @@
 #include <GL/glew.h>
 #include <GLFW/glfw3.h>
 #include "TextureManager.h"
+#include "skybox.h"
+#include "Sphere.h"
 
 #include <stdio.h>
 #include <iostream>
@@ -26,6 +28,20 @@ int VIEWPORT_WIDTH = VIEW_SIZE_WIDTH, VIEWPORT_HEIGHT = VIEW_SIZE_HEIGHT;
 GLuint vao[40];
 GLuint vbo[2];
 camera* cam;
+GLuint vao_index = 0;
+
+GLuint sceneFbo, sunFbo, blurFbo, sunScatterFbo, lensFlareHaloFbo, quadFbo;
+GLuint textureColorBufferMultiSampled;
+GLuint vertexAttribute, texAttribute;
+
+glm::mat4 scale(glm::scale(glm::mat4(1.0f), glm::vec3(5.0f, 5.0f, 5.0f)));
+float rotation[3] = { 0.0, 0.0, 0.0 };
+float sphereScale = 20.0f, cloudScale = sphereScale + 0.1, atmosphereScale = sphereScale + 0.3f;
+
+// Light Variables
+glm::vec4 lightColor(1.25, 1.25, 1.25, 1.0);
+glm::vec4 lightPosition(100.0, 0.0, 100.0, 1.0);
+glm::vec3 sunPos(20.0, 0.0, 20.0);
 
 glm::vec3 up_vector(0, 1, 0);
 glm::vec3 camera_position(-20.0, 0.0, 50.0);
@@ -39,9 +55,10 @@ float n = 0.01f;
 float f = 10000.5f;
 
 // Object variables
- 
+// Object variables
+shared_ptr<Sphere> s, cs, as, ss;
+Skybox* skybox;
 TextureManager& textureManager = TextureManager::GetInstance();
-GLuint sceneFbo, sunFbo, blurFbo, sunScatterFbo, lensFlareHaloFbo, quadFbo;
 
 GLuint cloudmap_program, 
 		skybox_program, 
@@ -54,6 +71,27 @@ GLuint cloudmap_program,
 		blur_program, 
 		quad_program, 
 		lens_flare_halo_program;
+
+//quad variables
+// x,y vertex positions
+float quad_vertices[] = {
+	-1.0, -1.0, 0.0,
+	1.0, -1.0, 0.0,
+	1.0,  1.0, 0.0,
+	1.0,  1.0, 0.0,
+	-1.0,  1.0, 0.0,
+	-1.0, -1.0, 0.0
+};
+
+// per-vertex texture coordinates
+float quad_texcoords[] = {
+	0.0, 0.0,
+	1.0, 0.0,
+	1.0, 1.0,
+	1.0, 1.0,
+	0.0, 1.0,
+	0.0, 0.0
+};
 
 extern GLuint LoadShaders(const char * vertex_file_path, const char * fragment_file_path, const char*geometry_file_path);
 
@@ -87,6 +125,61 @@ GLuint generateFrameBufferObject(const GLuint& renderTexture, const GLuint& dept
 	}
 	glBindFramebuffer(GL_FRAMEBUFFER, 0);
 	return fbo;
+}
+
+void initAtmosphericUniforms(vector<GLuint> shaderPrograms)
+{
+	GLfloat innerRadius = s->getRadius() * s->getSize().x;
+	GLfloat outerRadius = as->getRadius() * as->getSize().x;
+	GLfloat scale = 1.0f / (outerRadius - innerRadius);
+	GLfloat scaleDepth = 0.25;
+	GLfloat scaleOverScaleDepth = scale / scaleDepth;
+	GLfloat Kr = 0.0025f;
+	GLfloat Km = 0.0010f;
+	GLfloat ESun = 16.0f;
+	GLfloat g = -0.99f;
+
+	for (GLuint i = 0; i < shaderPrograms.size(); i++)
+	{
+		glUseProgram(shaderPrograms[i]);
+		glUniform3f(glGetUniformLocation(shaderPrograms[i], "v3InvWavelength"), 1.0f / powf(0.650f, 4.0f), 1.0f / powf(0.570f, 4.0f), 1.0f / powf(0.475f, 4.0f));
+		glUniform1f(glGetUniformLocation(shaderPrograms[i], "fInnerRadius"), innerRadius);
+		glUniform1f(glGetUniformLocation(shaderPrograms[i], "fInnerRadius2"), innerRadius * innerRadius);
+		glUniform1f(glGetUniformLocation(shaderPrograms[i], "fOuterRadius"), outerRadius);
+		glUniform1f(glGetUniformLocation(shaderPrograms[i], "fOuterRadius2"), outerRadius * outerRadius);
+		glUniform1f(glGetUniformLocation(shaderPrograms[i], "fKrESun"), Kr * ESun);
+		glUniform1f(glGetUniformLocation(shaderPrograms[i], "fKmESun"), Km * ESun);
+		glUniform1f(glGetUniformLocation(shaderPrograms[i], "fKr4PI"), Kr * 4.0f * (float)PI);
+		glUniform1f(glGetUniformLocation(shaderPrograms[i], "fKm4PI"), Km * 4.0f * (float)PI);
+		glUniform1f(glGetUniformLocation(shaderPrograms[i], "fScale"), scale);
+		glUniform1f(glGetUniformLocation(shaderPrograms[i], "fScaleDepth"), scaleDepth);
+		glUniform1f(glGetUniformLocation(shaderPrograms[i], "fScaleOverScaleDepth"), scaleOverScaleDepth);
+		glUniform1f(glGetUniformLocation(shaderPrograms[i], "g"), g);
+		glUniform1f(glGetUniformLocation(shaderPrograms[i], "g2"), g * g);
+		glUniform1i(glGetUniformLocation(shaderPrograms[i], "Samples"), 4);
+	}
+
+	glUseProgram(0);
+}
+
+
+void initBuffers(GLuint& index, GLuint program) {
+	vertexAttribute = glGetAttribLocation(program, "vPosition");
+	texAttribute = glGetAttribLocation(program, "vTexCoord");
+
+	glBindVertexArray(vao[index]);
+
+	glGenBuffers(2, vbo);
+
+	glBindBuffer(GL_ARRAY_BUFFER, vbo[0]);
+	glBufferData(GL_ARRAY_BUFFER, sizeof(quad_vertices), quad_vertices, GL_STATIC_DRAW);
+	glEnableVertexAttribArray(vertexAttribute);
+	glVertexAttribPointer(vertexAttribute, 3, GL_FLOAT, GL_FALSE, 0, 0);
+
+	glBindBuffer(GL_ARRAY_BUFFER, vbo[1]);
+	glBufferData(GL_ARRAY_BUFFER, sizeof(quad_texcoords), quad_texcoords, GL_STATIC_DRAW);
+	glEnableVertexAttribArray(texAttribute);
+	glVertexAttribPointer(texAttribute, 2, GL_FLOAT, GL_FALSE, 0, 0);
 }
 
 void init()
@@ -223,6 +316,83 @@ void init()
 	lensFlareHaloFbo = generateFrameBufferObject(textureManager["lensFlareHaloColorTexture"]);
 	quadFbo = generateFrameBufferObject(textureManager["quadColorTexture"]);
 
+	map<string, string> textureHandles;
+
+	curr_program = normalmap_program;
+
+
+	textureHandles.clear();
+	textureHandles.insert(make_pair("earthDay", "day"));
+	textureHandles.insert(make_pair("earthNight", "night"));
+	textureHandles.insert(make_pair("earthSpecularMap", "specMap"));
+	textureHandles.insert(make_pair("earthNormalMap", "bumpMap"));
+	textureHandles.insert(make_pair("earthClouds", "clouds"));
+	//earth
+	s = shared_ptr<Sphere>(new Sphere(vao[vao_index], 1.0f, 50, 50, 0.015f, 0.f));
+	s->generateMesh();
+	s->setTextureHandles(textureHandles);
+	s->setScale(sphereScale, sphereScale, sphereScale);
+	s->setDiffuseColor(1.0f, 0.941f, 0.898f);
+	s->initBuffers(curr_program);
+
+	vao_index++;
+	curr_program = cloudmap_program;
+
+	textureHandles.clear();
+	textureHandles.insert(make_pair("earthClouds", "clouds"));
+	textureHandles.insert(make_pair("earthCloudsNormalMap", "cloudBumpMap"));
+	textureHandles.insert(make_pair("earthNightBlur", "nightLights"));
+
+	//cloud
+	cs = shared_ptr<Sphere>(new Sphere(vao[vao_index], 1.0f, 50, 50, 0.02f, 0.f));
+	cs->generateMesh();
+	cs->setTextureHandles(textureHandles);
+	cs->setScale(cloudScale, cloudScale, cloudScale);
+	cs->setDiffuseColor(1.0f, 0.941f, 0.898f);
+	cs->initBuffers(curr_program);
+
+	vao_index++;
+	curr_program = atmosphere_program;
+
+	atmosphereScale = sphereScale + 0.3;
+
+	//atmosphere
+	as = shared_ptr<Sphere>(new Sphere(vao[vao_index], 1.0f, 50, 50, 0.0, 0.0));
+	as->setScale(atmosphereScale, atmosphereScale, atmosphereScale);
+	as->generateMesh();
+	as->initBuffers(curr_program);
+
+	vao_index++; //sun
+	curr_program = sun_program;
+	ss = shared_ptr<Sphere>(new Sphere(vao[vao_index], 1.0f, 50, 50, 0.0, 0.0));
+	ss->setPosition(sunPos.x, sunPos.y, sunPos.z);
+	ss->setScale(100, 100, 100);
+	ss->generateMesh();
+	ss->initBuffers(curr_program);
+
+	vao_index++;
+	curr_program = skybox_program;
+
+	textureHandles.clear();
+	textureHandles.insert(make_pair("skybox", "skybox"));
+
+	skybox = new Skybox(vao[vao_index], faces);
+	skybox->generateMesh();
+	skybox->setScale(5.0, 5.0, 5.0);
+	skybox->setDiffuseColor(0.0, 0.0, 0.5);
+	skybox->setTextureHandles(textureHandles);
+	skybox->enableCubemap();
+	skybox->initBuffers(curr_program);
+
+	vao_index++;
+	curr_program = fxaa_program;
+
+	initBuffers(vao_index, fxaa_program);
+
+	vector<GLuint> shaderPrograms;
+	shaderPrograms.push_back(atmosphere_program);
+	shaderPrograms.push_back(normalmap_program);
+	initAtmosphericUniforms(shaderPrograms);
 
 }
 
